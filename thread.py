@@ -231,7 +231,7 @@ class WorkThread_plot(QThread):
 
 
     def run(self):
-        #   【plot_resu】
+        #    【plot_resu】
         self.plot_result.setRows(row = 1, col = 2, hratio = [2, 1])
         g1 = sns.heatmap(
             self.data_distrance, linewidths = 0, cmap = 'Reds', square = True, 
@@ -297,7 +297,7 @@ class WorkThread_plot(QThread):
         self.signal_plot_result.emit(self.plot_result)
 
 
-        #   【plot_cluster】
+        #    【plot_cluster】
         cluster_uni, table_dict = np.unique(self.cluster_array), {}
         for cluster in cluster_uni:
             table_dict[cluster] = 0

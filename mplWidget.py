@@ -23,8 +23,16 @@ class MplWidget(QWidget):
         
         self.setLayout(vertical_layout)
 
-    def setRows(self):
+    def setRows(self, row, col, vratio = None, hratio = None):
         self.canvas.figure.clf()
+        if (row > 1) & (col > 1):
+            gridspec_kw_dict = {'width_ratios': hratio, 'height_ratios': vratio}
+        elif (row == 1) & (col > 1):
+            gridspec_kw_dict = {'width_ratios': hratio}
+        elif (row > 1) & (col == 1):
+            gridspec_kw_dict = {'height_ratios': vratio}
+        else:
+            gridspec_kw_dict = {}
         self.canvas.ax = self.canvas.figure.subplots(
-            1, 2, subplot_kw = {'facecolor':'#EEEEEE'}, gridspec_kw = {'width_ratios': [2, 1]}
+            row, col, subplot_kw = {'facecolor':'#EEEEEE'}, gridspec_kw = gridspec_kw_dict
             )  

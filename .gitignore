@@ -1,7 +1,11 @@
 /build
 /dist
+/data
 /favicon.ico
 /heatmap_GUI.spec
+/scroll checkbox範例.py
+/tabs範例.py
+/test_for_time.py
 /__pycache__
 /熱圖-GUI架構.pptx
 /程式測試與執行須知.txt

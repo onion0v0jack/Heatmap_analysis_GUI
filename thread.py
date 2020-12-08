@@ -17,17 +17,20 @@ plt.rcParams['axes.unicode_minus'] = False
 pd.options.mode.chained_assignment = None
 
 class WorkThread(QThread):
-    signal_data_table = Signal(pd.DataFrame)
+    signal_data_table_ori = Signal(pd.DataFrame)
     signal_data_table_cv = Signal(pd.DataFrame)
     signal_action = Signal(str)
     signal_data_list_for_plot = Signal(list)
     signal_data_message_update = Signal(pd.DataFrame) 
+    signal_data_errorlog = Signal(pd.DataFrame) 
 
-    def __init__(self, date, filename, show_column_list, df_message):
+    def __init__(self, date, filename, show_column_list, df_message, parameter):
         super().__init__()
         self.date = date
         self.filename = filename
         self.show_column_list = show_column_list
+        self.df_message = df_message
+        self.parameter = parameter
         self.input_data = None
         self.column_index_eng_dict = {
             0: 'daTemp_MeltRealN',
@@ -127,7 +130,8 @@ class WorkThread(QThread):
         }
         self.output_data = pd.DataFrame()
         self.output_cv = pd.DataFrame()
-        self.df_message = df_message
+        self.output_errorlog = pd.DataFrame()
+        
 
     def run(self):
         try:
@@ -135,7 +139,6 @@ class WorkThread(QThread):
             self.input_data = pd.read_table(r'{}'.format(self.filename), sep = ',')
             self.input_data['TriggerTime'] = pd.to_datetime(self.input_data['TriggerTime'])
             self.input_data['CreateTime'] = pd.to_datetime(self.input_data['CreateTime'])
-            # print(self.input_data.head(3))
             self.input_data = self.input_data[self.input_data['TriggerTime'].dt.strftime('%Y-%m-%d') == self.date]
         except:
             self.signal_action.emit(f'無法載入資料，請檢查資料內容是否有誤')
@@ -156,18 +159,16 @@ class WorkThread(QThread):
                 self.output_data['catch_sn'] = pd.to_datetime(self.output_data['catch_sn'])
                 self.output_data['index'] = self.output_data.index
                 
-                self.signal_action.emit(f'資料轉換完成')
-                print(self.output_data.shape)
-                self.output_data = self.output_data[['index', 'eq_ip', 'catch_sn', 'wNumofshot'] + self.show_column_list]
+                self.output_data = self.output_data[['index', 'catch_sn', 'wNumofshot'] + self.show_column_list]
                 #變異係數由大到小排序
                 self.output_cv = pd.DataFrame((self.output_data[self.show_column_list].std()/self.output_data[self.show_column_list].mean()).sort_values(ascending = False).round(6), columns = ['變異係數'])
                 self.output_cv['欄位變數'] = self.output_cv.index
-                self.signal_data_table.emit(self.output_data)
+                self.signal_action.emit(f'資料轉換完成')
+                self.signal_data_table_ori.emit(self.output_data)
                 self.signal_data_table_cv.emit(self.output_cv[['欄位變數', '變異係數']])
                 
                 self.input_data, self.output_cv = None, None
-                data_window_arg = self.output_data.iloc[:, :4]
-                data_window_ori = self.output_data.iloc[:, 4:]
+                data_window_arg, data_window_ori = self.output_data.iloc[:, :4], self.output_data.iloc[:, 4:]
                 data_window_arg.reset_index(drop = True, inplace = True)
                 data_window_ori.reset_index(drop = True, inplace = True)
                 
@@ -175,7 +176,7 @@ class WorkThread(QThread):
                 if len(data_window_arg) > 2:
                     rou_time = data_window_arg.loc[:, 'catch_sn'].diff().dt.total_seconds()/data_window_arg.loc[:, 'catch_sn'].diff().dt.total_seconds().shift(1)
                     b_now_high, b_next_low = 10, 0.2
-                    select_rou = rou_time[(rou_time >= b_now_high) & (rou_time.shift(-1) <= b_next_low)]
+                    select_rou = rou_time[(rou_time >= b_now_high) & (rou_time.shift(-1) <= b_next_low) & (rou_time != np.inf)]
                     if len(select_rou) > 0:
                         for select_index in select_rou.index:
                             self.df_message = self.df_message.append(pd.Series({
@@ -183,33 +184,48 @@ class WorkThread(QThread):
                                 'catch_sn': data_window_arg.loc[select_index, 'catch_sn'], 
                                 'message': '機器閒置過久，或重新開機生產'
                                 }), ignore_index=True)
-
+                
                 self.output_data = None    
                 Distance_matrix = pd.DataFrame(distance_matrix(data_window_ori.values, data_window_ori.values), index = data_window_ori.index, columns = data_window_ori.index)
-                
                 if len(Distance_matrix) > 3:
                     DMDA = Distance_matrix.mean().diff().abs()
-                    alpha, k = 0.35, 3
+                    alpha, k = self.parameter[2], self.parameter[3]
                     Q1, Q3 = DMDA.quantile(0.5 - alpha), DMDA.quantile(0.5 + alpha)
-                    IQR = Q3 - Q1
-                    UB = Q3 + k * IQR
-                    print(DMDA)
+                    UB = Q3 + k * (Q3 - Q1)
                     select_DMDA_index = DMDA[DMDA >= UB].index
+                    self.output_errorlog, window_size = pd.DataFrame([], columns = ['Index', 'catch_sn'] + [i for i in data_window_ori.columns]), 10
                     if len(select_DMDA_index) > 0:
-                        for select_index in select_DMDA_index:
+                        count = 0
+                        for i, select_index in enumerate(select_DMDA_index):
                             self.df_message = self.df_message.append(pd.Series({
                                 'index': select_index, 
                                 'catch_sn': data_window_arg.loc[select_index, 'catch_sn'], 
                                 'message': '機台數值突發異常'
                                 }), ignore_index=True)
+                            pass_index = select_DMDA_index[(select_DMDA_index < select_index) & (select_DMDA_index >= select_index - window_size)]    
+                            reference_index = [i for i in range(max(0, select_index - window_size - len(pass_index)), select_index) if i not in pass_index]
+                            now_data, reference_data = data_window_ori.loc[select_index, :], data_window_ori.loc[reference_index, :]
+                            column_list, abnormal_column = now_data.index, []
+                            for column in column_list:
+                                LB_window, UB_window = min(reference_data[column]), max(reference_data[column])
+                                if (now_data[column] < LB_window) | (now_data[column] > UB_window): abnormal_column.append(column)
+                            self.output_errorlog.loc[i, :] = 0
+                            self.output_errorlog.loc[i, abnormal_column] = 1
+                            self.output_errorlog.loc[i, 'Index'] = select_index
+                            count += 1
+                        if len(self.output_errorlog) > 0:
+                            self.output_errorlog.loc[:, 'catch_sn'] = data_window_arg.loc[select_DMDA_index, 'catch_sn'].values
+                            self.output_errorlog.loc[count, self.output_errorlog.columns[2:]] = [int(j) for j in self.output_errorlog.loc[:, self.output_errorlog.columns[2:]].sum()]
+                            self.output_errorlog.loc[count, 'Index'] = 'Total'
 
                 # 每模次資料的分類
-                clustering = DBSCAN(eps = 11, min_samples = 9).fit(data_window_ori)
+                clustering = DBSCAN(eps = self.parameter[0], min_samples = self.parameter[1]).fit(data_window_ori)
 
-                self.signal_data_list_for_plot.emit([data_window_arg, Distance_matrix, clustering.labels_])
                 self.df_message = self.df_message.sort_values(by = ['index'])
                 self.df_message.reset_index(drop = True, inplace = True)
+                self.signal_data_list_for_plot.emit([data_window_arg, Distance_matrix, clustering.labels_])
                 self.signal_data_message_update.emit(self.df_message)
+                self.signal_data_errorlog.emit(self.output_errorlog)
             else:
                 self.signal_action.emit(f'此日期無資料')
 
@@ -217,7 +233,7 @@ class WorkThread_plot(QThread):
     signal_plot_result = Signal(object)
     signal_plot_cluster = Signal(object)
 
-    def __init__(self, date, arg, distance, criteria, cluster_array, plot_result, plot_cluster):
+    def __init__(self, date, arg, distance, criteria, cluster_array, plot_result, plot_cluster, parameter_list):
         super().__init__()
 
         self.date = date
@@ -227,11 +243,10 @@ class WorkThread_plot(QThread):
         self.cluster_array = cluster_array
         self.plot_result = plot_result
         self.plot_cluster = plot_cluster
-        
-
+        self.parameter = parameter_list
 
     def run(self):
-        #    【plot_resu】
+        #    【plot_result】
         self.plot_result.setRows(row = 1, col = 2, hratio = [2, 1])
         g1 = sns.heatmap(
             self.data_distrance, linewidths = 0, cmap = 'Reds', square = True, 
@@ -250,7 +265,7 @@ class WorkThread_plot(QThread):
 
         rou_time = self.data_arg.loc[:, 'catch_sn'].diff().dt.total_seconds()/self.data_arg.loc[:, 'catch_sn'].diff().dt.total_seconds().shift(1)
         b_now_high, b_next_low = 10, 0.2
-        select_rou = rou_time[(rou_time >= b_now_high) & (rou_time.shift(-1) <= b_next_low)]
+        select_rou = rou_time[(rou_time >= b_now_high) & (rou_time.shift(-1) <= b_next_low) & (rou_time != np.inf)]
         
         
         self.plot_result.canvas.ax[1].plot(
@@ -278,19 +293,15 @@ class WorkThread_plot(QThread):
             color = 'lightcoral', markerfacecolor = 'tomato', markeredgecolor = 'tomato'
         )
 
-        alpha, k = 0.35, 3
+        alpha, k = self.parameter[2], self.parameter[3]
         Q1, Q3 = self.DMDA.quantile(0.5 - alpha), self.DMDA.quantile(0.5 + alpha)
-        IQR = Q3 - Q1
-        UB = Q3 + k * IQR
+        UB = Q3 + k * (Q3 - Q1)
         ax2_twin.axhline(y = UB, linewidth = 1, color = 'k')
-
 
         ax2_twin.set_ylabel(r'$\sigma_{i}$', fontproperties = FontProperties(fname = "SimHei.ttf", size = 14), rotation = 0, labelpad = 25)
         ax2_twin.yaxis.set_tick_params(labelsize = 8)
-        if self.DMDA.max() > 10:
-            ax2_twin.set_ylim(-1, self.DMDA.max()*1.025)
-        else:
-            ax2_twin.set_ylim(-1, 10)
+        if self.DMDA.max() > 10: ax2_twin.set_ylim(-1, self.DMDA.max()*1.025)
+        else: ax2_twin.set_ylim(-1, 10)
 
         self.plot_result.canvas.figure.tight_layout()
         self.plot_result.canvas.draw()
@@ -301,9 +312,8 @@ class WorkThread_plot(QThread):
         cluster_uni, table_dict = np.unique(self.cluster_array), {}
         for cluster in cluster_uni:
             table_dict[cluster] = 0
-        print(self.cluster_array)
+        # print(self.cluster_array)
         for i in self.cluster_array:
-            print('OK')
             table_dict[i] += 1
 
         self.plot_cluster.setRows(row = 1, col = 1)
@@ -313,7 +323,7 @@ class WorkThread_plot(QThread):
         )
         self.plot_cluster.canvas.ax.set_xlabel('Index', fontproperties = FontProperties(fname = "SimHei.ttf", size = 14))
         self.plot_cluster.canvas.ax.set_ylabel('Class', fontproperties = FontProperties(fname = "SimHei.ttf", size = 14))
-        self.plot_cluster.canvas.ax.set_title(r'{} 分群結果: {}'.format(self.date, table_dict), fontproperties = FontProperties(fname = "SimHei.ttf", size = 14))
+        self.plot_cluster.canvas.ax.set_title(r'分群結果: {}'.format(table_dict), fontproperties = FontProperties(fname = "SimHei.ttf", size = 11))
         self.plot_cluster.canvas.ax.set_yticks([i for i in cluster_uni])
         self.plot_cluster.canvas.ax.set_yticklabels([str(i) for i in cluster_uni])
         self.plot_cluster.canvas.figure.tight_layout()
